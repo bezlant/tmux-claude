@@ -8,7 +8,7 @@ fi
 
 pane_count=$(tmux list-panes -F '#{pane_id}' | wc -l | tr -d ' ')
 if [ "$pane_count" -le 1 ]; then
-    tmux display-message "Only one pane — nothing to dashboard"
+    tmux display-message "Dashboard: only one pane open"
     exit 0
 fi
 
