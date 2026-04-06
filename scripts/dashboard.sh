@@ -1,9 +1,18 @@
 #!/usr/bin/env bash
 # Dashboard popup: shows last N lines from every pane in the current window
-# Triggered by prefix + D
+
+if [ -z "$TMUX" ]; then
+    echo "Not in a tmux session" >&2
+    exit 1
+fi
+
+pane_count=$(tmux list-panes -F '#{pane_id}' | wc -l | tr -d ' ')
+if [ "$pane_count" -le 1 ]; then
+    tmux display-message "Only one pane — nothing to dashboard"
+    exit 0
+fi
 
 LINES_PER_PANE=8
-SEPARATOR="━"
 
 generate_dashboard() {
     local current_pane

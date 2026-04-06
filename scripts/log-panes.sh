@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # Auto-log all panes in the current window to files
-# Logs go to $TMPDIR/claude-team-pane-{index}-{timestamp}.log
+
+if [ -z "$TMUX" ]; then
+    echo "Not in a tmux session" >&2
+    exit 1
+fi
 
 TIMESTAMP=$(date +%Y%m%d-%H%M%S)
 LOG_DIR="${TMPDIR:-/tmp}/claude-team-logs/$TIMESTAMP"
