@@ -52,36 +52,6 @@ assert_not_contains() {
 }
 
 # ============================================================
-echo "=== session-save: path encoding ==="
-# ============================================================
-
-# Source the encode function from session-save.sh
-encode_project_path() {
-    echo "$1" | sed 's|[/.]|-|g'
-}
-
-assert_eq "simple path" \
-    "-Users-foo-Projects-bar" \
-    "$(encode_project_path "/Users/foo/Projects/bar")"
-
-assert_eq "dotfile path" \
-    "-Users-foo--config" \
-    "$(encode_project_path "/Users/foo/.config")"
-
-assert_eq "nested dotfile" \
-    "-Users-foo--config-nvim" \
-    "$(encode_project_path "/Users/foo/.config/nvim")"
-
-assert_eq "home directory" \
-    "-Users-foo" \
-    "$(encode_project_path "/Users/foo")"
-
-assert_eq "path with .git" \
-    "-Users-foo-repo--git" \
-    "$(encode_project_path "/Users/foo/repo/.git")"
-
-# ============================================================
-echo ""
 echo "=== session-save: process matching ==="
 # ============================================================
 
@@ -109,26 +79,89 @@ echo "=== session-restore: mapping file parsing ==="
 
 tmpdir=$(mktemp -d)
 cat > "$tmpdir/claude-panes.txt" <<'EOF'
-0:1.1|/Users/foo/project-a|abc-123-uuid
-0:2.1|/Users/foo/project-b|
-0:3.1|/Users/foo/project-a|
+0:1.1|/Users/foo/project-a
+0:2.1|/Users/foo/project-b
+0:3.1|/Users/foo/project-a
 EOF
 
 # Simulate restore logic
 cmds=""
-while IFS='|' read -r target cwd uuid; do
+while IFS='|' read -r target cwd; do
     [ -z "$target" ] && continue
-    if [ -n "$uuid" ]; then
-        cmds="${cmds}claude --resume '${uuid}'\n"
-    else
-        cmds="${cmds}claude --resume '${target}'\n"
-    fi
+    cmds="${cmds}claude --resume '${target}'\n"
 done < "$tmpdir/claude-panes.txt"
 
-assert_contains "UUID pane gets direct resume" "claude --resume 'abc-123-uuid'" "$cmds"
-assert_contains "no-UUID pane gets name filter" "claude --resume '0:2.1'" "$cmds"
-assert_contains "second no-UUID pane gets name filter" "claude --resume '0:3.1'" "$cmds"
+assert_contains "pane 1 resumes by name" "claude --resume '0:1.1'" "$cmds"
+assert_contains "pane 2 resumes by name" "claude --resume '0:2.1'" "$cmds"
+assert_contains "pane 3 resumes by name" "claude --resume '0:3.1'" "$cmds"
 assert_eq "exactly 3 commands" "3" "$(echo -e "$cmds" | grep -c 'claude --resume')"
+
+rm -rf "$tmpdir"
+
+# ============================================================
+echo ""
+echo "=== session-restore: multiple panes same project dir ==="
+# ============================================================
+
+tmpdir=$(mktemp -d)
+cat > "$tmpdir/claude-panes.txt" <<'EOF'
+main:0.0|/Users/foo/monorepo
+main:0.1|/Users/foo/monorepo
+main:1.0|/Users/foo/monorepo
+EOF
+
+cmds=""
+while IFS='|' read -r target cwd; do
+    [ -z "$target" ] && continue
+    cmds="${cmds}claude --resume '${target}'\n"
+done < "$tmpdir/claude-panes.txt"
+
+assert_contains "first pane gets own name" "claude --resume 'main:0.0'" "$cmds"
+assert_contains "second pane gets own name" "claude --resume 'main:0.1'" "$cmds"
+assert_contains "third pane gets own name" "claude --resume 'main:1.0'" "$cmds"
+assert_eq "3 distinct commands for same-dir panes" "3" "$(echo -e "$cmds" | grep -c 'claude --resume')"
+
+rm -rf "$tmpdir"
+
+# ============================================================
+echo ""
+echo "=== session-restore: blank lines and whitespace in mapping ==="
+# ============================================================
+
+tmpdir=$(mktemp -d)
+# Blank lines, trailing newlines — should be skipped gracefully
+printf '0:0.0|/Users/foo/project\n\n\n0:1.0|/Users/foo/other\n' > "$tmpdir/claude-panes.txt"
+
+cmds=""
+while IFS='|' read -r target cwd; do
+    [ -z "$target" ] && continue
+    cmds="${cmds}claude --resume '${target}'\n"
+done < "$tmpdir/claude-panes.txt"
+
+assert_eq "blank lines skipped, exactly 2 commands" "2" "$(echo -e "$cmds" | grep -c 'claude --resume')"
+
+rm -rf "$tmpdir"
+
+# ============================================================
+echo ""
+echo "=== session-restore: special chars in session name ==="
+# ============================================================
+
+tmpdir=$(mktemp -d)
+# Session names can contain hyphens, underscores, dots
+cat > "$tmpdir/claude-panes.txt" <<'EOF'
+my-session_2:3.1|/Users/foo/project
+work.dotfiles:0.0|/Users/foo/.config
+EOF
+
+cmds=""
+while IFS='|' read -r target cwd; do
+    [ -z "$target" ] && continue
+    cmds="${cmds}claude --resume '${target}'\n"
+done < "$tmpdir/claude-panes.txt"
+
+assert_contains "hyphen/underscore session name" "claude --resume 'my-session_2:3.1'" "$cmds"
+assert_contains "dotted session name" "claude --resume 'work.dotfiles:0.0'" "$cmds"
 
 rm -rf "$tmpdir"
 
@@ -212,34 +245,6 @@ if command -v fish &>/dev/null; then
 else
     echo "  SKIP: fish not installed"
 fi
-
-# ============================================================
-echo ""
-echo "=== session-save: UUID extraction ==="
-# ============================================================
-
-tmpdir=$(mktemp -d)
-projdir="$tmpdir/projects/-test-project"
-mkdir -p "$projdir"
-
-# Single session file
-touch "$projdir/aaaaaaaa-1111-2222-3333-444444444444.jsonl"
-uuid=$(ls -t "$projdir"/*.jsonl 2>/dev/null | head -1 | xargs basename 2>/dev/null | sed 's/\.jsonl$//')
-assert_eq "extracts UUID from single .jsonl" "aaaaaaaa-1111-2222-3333-444444444444" "$uuid"
-
-# Multiple session files — most recent wins
-sleep 1
-touch "$projdir/bbbbbbbb-5555-6666-7777-888888888888.jsonl"
-uuid=$(ls -t "$projdir"/*.jsonl 2>/dev/null | head -1 | xargs basename 2>/dev/null | sed 's/\.jsonl$//')
-assert_eq "extracts most recent UUID" "bbbbbbbb-5555-6666-7777-888888888888" "$uuid"
-
-# Empty directory
-emptydir="$tmpdir/projects/-empty"
-mkdir -p "$emptydir"
-uuid=$(ls -t "$emptydir"/*.jsonl 2>/dev/null | head -1 | xargs basename 2>/dev/null | sed 's/\.jsonl$//')
-assert_eq "empty dir returns empty UUID" "" "$uuid"
-
-rm -rf "$tmpdir"
 
 # ============================================================
 echo ""
