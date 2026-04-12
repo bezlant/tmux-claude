@@ -12,5 +12,7 @@ function __tmux_claude_session_args
     set -l sess (tmux display-message -p '#{session_name}' 2>/dev/null)
     set -l win (tmux display-message -p '#{window_index}' 2>/dev/null)
     set -l pane (tmux display-message -p '#{pane_index}' 2>/dev/null)
-    test -n "$sess" -a -n "$win" -a -n "$pane"; and echo -- --name "$sess:$win.$pane"
+    if test -n "$sess" -a -n "$win" -a -n "$pane"
+        printf '%s\n' --name "$sess:$win.$pane"
+    end
 end
