@@ -55,15 +55,14 @@ assert_not_contains() {
 echo "=== session-save: process matching ==="
 # ============================================================
 
-# Simulate ps output and test awk filter
-ps_output="ttys001  claude --dangerously-skip-permissions --teammate-mode tmux
-ttys002  /bin/bash /Users/foo/.claude/statusline-simple.sh
-ttys003  node /opt/homebrew/bin/claude-limitline
-ttys001  fish -c claude --version
-ttys004  claude --resume abc123
-??       /bin/zsh -c source /Users/foo/.claude/shell-snapshots/snap.sh"
+ps_output="ttys001  55588 claude --dangerously-skip-permissions --teammate-mode tmux
+ttys002  12345 /bin/bash /Users/foo/.claude/statusline-simple.sh
+ttys003  23456 node /opt/homebrew/bin/claude-limitline
+ttys001  34567 fish -c claude --version
+ttys004  45678 claude --resume abc123
+??       56789 /bin/zsh -c source /Users/foo/.claude/shell-snapshots/snap.sh"
 
-matched=$(echo "$ps_output" | awk '$2 == "claude"')
+matched=$(echo "$ps_output" | awk '$3 == "claude"')
 
 assert_contains "matches claude binary" "ttys001" "$matched"
 assert_contains "matches claude --resume" "ttys004" "$matched"
@@ -74,94 +73,95 @@ assert_not_contains "rejects fish -c claude" "fish" "$matched"
 
 # ============================================================
 echo ""
-echo "=== session-restore: mapping file parsing ==="
+echo "=== session-save: PID file UUID extraction ==="
+# ============================================================
+
+tmpdir=$(mktemp -d)
+mkdir -p "$tmpdir/sessions"
+
+# Valid PID file
+echo '{"pid":12345,"sessionId":"aaaaaaaa-1111-2222-3333-444444444444","cwd":"/foo"}' > "$tmpdir/sessions/12345.json"
+uuid=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['sessionId'])" "$tmpdir/sessions/12345.json" 2>/dev/null)
+assert_eq "extracts UUID from PID file" "aaaaaaaa-1111-2222-3333-444444444444" "$uuid"
+
+# Missing PID file
+uuid=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['sessionId'])" "$tmpdir/sessions/99999.json" 2>/dev/null)
+assert_eq "missing PID file returns empty" "" "$uuid"
+
+# Malformed PID file
+echo 'not json' > "$tmpdir/sessions/88888.json"
+uuid=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['sessionId'])" "$tmpdir/sessions/88888.json" 2>/dev/null)
+assert_eq "malformed PID file returns empty" "" "$uuid"
+
+rm -rf "$tmpdir"
+
+# ============================================================
+echo ""
+echo "=== session-restore: UUID-based resume ==="
 # ============================================================
 
 tmpdir=$(mktemp -d)
 cat > "$tmpdir/claude-panes.txt" <<'EOF'
-0:1.1|/Users/foo/project-a
-0:2.1|/Users/foo/project-b
-0:3.1|/Users/foo/project-a
+0:1.1|aaaaaaaa-1111-2222-3333-444444444444
+0:2.1|bbbbbbbb-5555-6666-7777-888888888888
+0:3.1|
 EOF
 
-# Simulate restore logic
 cmds=""
-while IFS='|' read -r target cwd; do
+while IFS='|' read -r target uuid; do
     [ -z "$target" ] && continue
-    cmds="${cmds}claude --resume '${target}'\n"
+    if [ -n "$uuid" ]; then
+        cmds="${cmds}claude --resume '${uuid}'\n"
+    else
+        cmds="${cmds}claude --resume\n"
+    fi
 done < "$tmpdir/claude-panes.txt"
 
-assert_contains "pane 1 resumes by name" "claude --resume '0:1.1'" "$cmds"
-assert_contains "pane 2 resumes by name" "claude --resume '0:2.1'" "$cmds"
-assert_contains "pane 3 resumes by name" "claude --resume '0:3.1'" "$cmds"
+assert_contains "UUID pane gets direct resume" "claude --resume 'aaaaaaaa-1111-2222-3333-444444444444'" "$cmds"
+assert_contains "second UUID pane gets direct resume" "claude --resume 'bbbbbbbb-5555-6666-7777-888888888888'" "$cmds"
+assert_contains "no-UUID pane gets picker" "claude --resume" "$cmds"
 assert_eq "exactly 3 commands" "3" "$(echo -e "$cmds" | grep -c 'claude --resume')"
 
 rm -rf "$tmpdir"
 
 # ============================================================
 echo ""
-echo "=== session-restore: multiple panes same project dir ==="
+echo "=== session-restore: empty/missing mapping file ==="
 # ============================================================
 
 tmpdir=$(mktemp -d)
-cat > "$tmpdir/claude-panes.txt" <<'EOF'
-main:0.0|/Users/foo/monorepo
-main:0.1|/Users/foo/monorepo
-main:1.0|/Users/foo/monorepo
-EOF
 
-cmds=""
-while IFS='|' read -r target cwd; do
-    [ -z "$target" ] && continue
-    cmds="${cmds}claude --resume '${target}'\n"
-done < "$tmpdir/claude-panes.txt"
+result=$(bash -c "
+    MAPPING_FILE='$tmpdir/claude-panes.txt'
+    [ -f \"\$MAPPING_FILE\" ] || { echo 'skipped'; exit 0; }
+    echo 'ran'
+")
+assert_eq "missing file -> skip" "skipped" "$result"
 
-assert_contains "first pane gets own name" "claude --resume 'main:0.0'" "$cmds"
-assert_contains "second pane gets own name" "claude --resume 'main:0.1'" "$cmds"
-assert_contains "third pane gets own name" "claude --resume 'main:1.0'" "$cmds"
-assert_eq "3 distinct commands for same-dir panes" "3" "$(echo -e "$cmds" | grep -c 'claude --resume')"
+touch "$tmpdir/claude-panes.txt"
+result=$(bash -c "
+    MAPPING_FILE='$tmpdir/claude-panes.txt'
+    [ -f \"\$MAPPING_FILE\" ] || { echo 'skipped'; exit 0; }
+    [ -s \"\$MAPPING_FILE\" ] || { echo 'skipped-empty'; exit 0; }
+    echo 'ran'
+")
+assert_eq "empty file -> skip" "skipped-empty" "$result"
 
 rm -rf "$tmpdir"
 
 # ============================================================
 echo ""
-echo "=== session-restore: blank lines and whitespace in mapping ==="
+echo "=== session-save: autoprune ==="
 # ============================================================
 
 tmpdir=$(mktemp -d)
-# Blank lines, trailing newlines — should be skipped gracefully
-printf '0:0.0|/Users/foo/project\n\n\n0:1.0|/Users/foo/other\n' > "$tmpdir/claude-panes.txt"
+for i in $(seq -w 1 25); do
+    touch "$tmpdir/tmux_resurrect_202604${i}T120000.txt"
+done
+assert_eq "25 files before prune" "25" "$(ls "$tmpdir"/tmux_resurrect_*.txt | wc -l | tr -d ' ')"
 
-cmds=""
-while IFS='|' read -r target cwd; do
-    [ -z "$target" ] && continue
-    cmds="${cmds}claude --resume '${target}'\n"
-done < "$tmpdir/claude-panes.txt"
-
-assert_eq "blank lines skipped, exactly 2 commands" "2" "$(echo -e "$cmds" | grep -c 'claude --resume')"
-
-rm -rf "$tmpdir"
-
-# ============================================================
-echo ""
-echo "=== session-restore: special chars in session name ==="
-# ============================================================
-
-tmpdir=$(mktemp -d)
-# Session names can contain hyphens, underscores, dots
-cat > "$tmpdir/claude-panes.txt" <<'EOF'
-my-session_2:3.1|/Users/foo/project
-work.dotfiles:0.0|/Users/foo/.config
-EOF
-
-cmds=""
-while IFS='|' read -r target cwd; do
-    [ -z "$target" ] && continue
-    cmds="${cmds}claude --resume '${target}'\n"
-done < "$tmpdir/claude-panes.txt"
-
-assert_contains "hyphen/underscore session name" "claude --resume 'my-session_2:3.1'" "$cmds"
-assert_contains "dotted session name" "claude --resume 'work.dotfiles:0.0'" "$cmds"
+(cd "$tmpdir" && ls -t tmux_resurrect_*.txt 2>/dev/null | tail -n +21 | xargs rm -f 2>/dev/null)
+assert_eq "20 files after prune" "20" "$(ls "$tmpdir"/tmux_resurrect_*.txt | wc -l | tr -d ' ')"
 
 rm -rf "$tmpdir"
 
@@ -177,7 +177,6 @@ if command -v fish &>/dev/null; then
         result=$(fish -c "
             source $PLUGIN_DIR/shell/__tmux_claude_session_args.fish
             set -gx TMUX '/tmp/test,1,0'
-            # Mock tmux to return predictable values
             function tmux
                 switch \$argv[3]
                     case '#{session_name}'; echo test
@@ -207,7 +206,7 @@ fi
 
 # ============================================================
 echo ""
-echo "=== fish wrapper: no helper installed (graceful degradation) ==="
+echo "=== fish wrapper: graceful degradation ==="
 # ============================================================
 
 if command -v fish &>/dev/null; then
@@ -217,7 +216,6 @@ if command -v fish &>/dev/null; then
     result=$(fish -c "
         set -gx PATH $tmpbin \$PATH
         set -gx TMUX '/tmp/test,1,0'
-        # Don't source the helper — simulate it not being installed
         functions -e __tmux_claude_session_args 2>/dev/null
         source $PLUGIN_DIR/shell/claude.fish
         claude --version
@@ -225,16 +223,7 @@ if command -v fish &>/dev/null; then
     rm -rf "$tmpbin"
     assert_contains "runs without helper" "MOCK_ARGS:" "$result"
     assert_not_contains "no --name when helper missing" "MOCK_ARGS: --name" "$result"
-else
-    echo "  SKIP: fish not installed"
-fi
 
-# ============================================================
-echo ""
-echo "=== fish wrapper: outside tmux (no injection) ==="
-# ============================================================
-
-if command -v fish &>/dev/null; then
     result=$(fish -c "
         source $PLUGIN_DIR/shell/__tmux_claude_session_args.fish
         set -e TMUX 2>/dev/null
@@ -248,64 +237,16 @@ fi
 
 # ============================================================
 echo ""
-echo "=== session-save: autoprune ==="
-# ============================================================
-
-tmpdir=$(mktemp -d)
-# Create 25 fake resurrect files
-for i in $(seq -w 1 25); do
-    touch "$tmpdir/tmux_resurrect_202604${i}T120000.txt"
-done
-assert_eq "25 files before prune" "25" "$(ls "$tmpdir"/tmux_resurrect_*.txt | wc -l | tr -d ' ')"
-
-# Prune keeping 20 (run in subshell to avoid cd side effects)
-(cd "$tmpdir" && ls -t tmux_resurrect_*.txt 2>/dev/null | tail -n +21 | xargs rm -f 2>/dev/null)
-assert_eq "20 files after prune" "20" "$(ls "$tmpdir"/tmux_resurrect_*.txt | wc -l | tr -d ' ')"
-
-rm -rf "$tmpdir"
-
-# ============================================================
-echo ""
-echo "=== session-restore: empty/missing mapping file ==="
-# ============================================================
-
-tmpdir=$(mktemp -d)
-
-# No file at all
-result=$(RESURRECT_DIR="$tmpdir" bash -c '
-    MAPPING_FILE="$RESURRECT_DIR/claude-panes.txt"
-    [ -f "$MAPPING_FILE" ] || { echo "skipped"; exit 0; }
-    echo "ran"
-')
-assert_eq "missing file -> skip" "skipped" "$result"
-
-# Empty file
-touch "$tmpdir/claude-panes.txt"
-result=$(bash -c "
-    MAPPING_FILE='$tmpdir/claude-panes.txt'
-    [ -f \"\$MAPPING_FILE\" ] || { echo 'skipped'; exit 0; }
-    [ -s \"\$MAPPING_FILE\" ] || { echo 'skipped-empty'; exit 0; }
-    echo 'ran'
-")
-assert_eq "empty file -> skip" "skipped-empty" "$result"
-
-rm -rf "$tmpdir"
-
-# ============================================================
-echo ""
 echo "=== claude.tmux: hook chaining ==="
 # ============================================================
 
 if [ -n "$TMUX" ]; then
-    # Save current values
     orig_save=$(tmux show-option -gqv @resurrect-hook-post-save-all 2>/dev/null)
     orig_restore=$(tmux show-option -gqv @resurrect-hook-post-restore-all 2>/dev/null)
 
-    # Clear and set a fake existing hook
     tmux set-option -g @resurrect-hook-post-save-all "echo existing-save" 2>/dev/null
     tmux set-option -g @resurrect-hook-post-restore-all "echo existing-restore" 2>/dev/null
 
-    # Run plugin entry point
     bash "$PLUGIN_DIR/claude.tmux" 2>/dev/null
 
     save_hook=$(tmux show-option -gqv @resurrect-hook-post-save-all 2>/dev/null)
@@ -316,7 +257,6 @@ if [ -n "$TMUX" ]; then
     assert_contains "restore hook chains existing" "echo existing-restore" "$restore_hook"
     assert_contains "restore hook adds session-restore" "session-restore.sh" "$restore_hook"
 
-    # Restore originals
     if [ -n "$orig_save" ]; then
         tmux set-option -g @resurrect-hook-post-save-all "$orig_save" 2>/dev/null
     else
@@ -328,10 +268,31 @@ if [ -n "$TMUX" ]; then
         tmux set-option -gu @resurrect-hook-post-restore-all 2>/dev/null
     fi
 
-    # Re-run plugin to restore correct hooks
     bash "$PLUGIN_DIR/claude.tmux" 2>/dev/null
 else
     echo "  SKIP: not in tmux"
+fi
+
+# ============================================================
+echo ""
+echo "=== session-save: live PID file mapping ==="
+# ============================================================
+
+if [ -n "$TMUX" ] && [ -d "$HOME/.claude/sessions" ]; then
+    # Count running claude processes
+    claude_count=$(ps -eo args= | awk '$1 == "claude"' | wc -l | tr -d ' ')
+    # Count PID files for running PIDs
+    matched=0
+    for pidfile in "$HOME/.claude/sessions"/*.json; do
+        [ -f "$pidfile" ] || continue
+        pid=$(basename "$pidfile" .json)
+        if ps -p "$pid" > /dev/null 2>&1; then
+            matched=$((matched + 1))
+        fi
+    done
+    assert_eq "PID files exist for all running claudes" "$claude_count" "$matched"
+else
+    echo "  SKIP: not in tmux or no session dir"
 fi
 
 # ============================================================
