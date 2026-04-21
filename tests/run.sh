@@ -257,6 +257,60 @@ if [ -n "$TMUX" ]; then
     assert_contains "restore hook chains existing" "echo existing-restore" "$restore_hook"
     assert_contains "restore hook adds session-restore" "session-restore.sh" "$restore_hook"
 
+    # Restore originals before idempotency test
+    if [ -n "$orig_save" ]; then
+        tmux set-option -g @resurrect-hook-post-save-all "$orig_save" 2>/dev/null
+    else
+        tmux set-option -gu @resurrect-hook-post-save-all 2>/dev/null
+    fi
+    if [ -n "$orig_restore" ]; then
+        tmux set-option -g @resurrect-hook-post-restore-all "$orig_restore" 2>/dev/null
+    else
+        tmux set-option -gu @resurrect-hook-post-restore-all 2>/dev/null
+    fi
+
+    bash "$PLUGIN_DIR/claude.tmux" 2>/dev/null
+else
+    echo "  SKIP: not in tmux"
+fi
+
+# ============================================================
+echo ""
+echo "=== claude.tmux: idempotent reload ==="
+# ============================================================
+
+if [ -n "$TMUX" ]; then
+    orig_save=$(tmux show-option -gqv @resurrect-hook-post-save-all 2>/dev/null)
+    orig_restore=$(tmux show-option -gqv @resurrect-hook-post-restore-all 2>/dev/null)
+
+    # Start clean
+    tmux set-option -gu @resurrect-hook-post-save-all 2>/dev/null
+    tmux set-option -gu @resurrect-hook-post-restore-all 2>/dev/null
+
+    # Load plugin twice (simulates prefix+I reload)
+    bash "$PLUGIN_DIR/claude.tmux" 2>/dev/null
+    bash "$PLUGIN_DIR/claude.tmux" 2>/dev/null
+
+    save_hook=$(tmux show-option -gqv @resurrect-hook-post-save-all 2>/dev/null)
+    restore_hook=$(tmux show-option -gqv @resurrect-hook-post-restore-all 2>/dev/null)
+
+    save_count=$(echo "$save_hook" | grep -o 'session-save\.sh' | wc -l | tr -d ' ')
+    restore_count=$(echo "$restore_hook" | grep -o 'session-restore\.sh' | wc -l | tr -d ' ')
+
+    assert_eq "save hook appears exactly once after double load" "1" "$save_count"
+    assert_eq "restore hook appears exactly once after double load" "1" "$restore_count"
+
+    # Also test: reload preserves existing user hooks
+    tmux set-option -gu @resurrect-hook-post-save-all 2>/dev/null
+    tmux set-option -g @resurrect-hook-post-save-all "echo user-hook" 2>/dev/null
+    bash "$PLUGIN_DIR/claude.tmux" 2>/dev/null
+    bash "$PLUGIN_DIR/claude.tmux" 2>/dev/null
+    save_hook=$(tmux show-option -gqv @resurrect-hook-post-save-all 2>/dev/null)
+    save_count=$(echo "$save_hook" | grep -o 'session-save\.sh' | wc -l | tr -d ' ')
+    assert_contains "user hook preserved after double load" "echo user-hook" "$save_hook"
+    assert_eq "save hook once even with user hook + double load" "1" "$save_count"
+
+    # Restore originals
     if [ -n "$orig_save" ]; then
         tmux set-option -g @resurrect-hook-post-save-all "$orig_save" 2>/dev/null
     else

@@ -17,8 +17,7 @@ MAX_SAVES=${TMUX_CLAUDE_MAX_SAVES:-20}
 
 # --- Prune old saves ---
 if [ -d "$RESURRECT_DIR" ]; then
-    cd "$RESURRECT_DIR" || exit 0
-    ls -t tmux_resurrect_*.txt 2>/dev/null | tail -n +$((MAX_SAVES + 1)) | xargs rm -f 2>/dev/null
+    (cd "$RESURRECT_DIR" && ls -t tmux_resurrect_*.txt 2>/dev/null | tail -n +$((MAX_SAVES + 1)) | xargs rm -f 2>/dev/null)
 fi
 
 # --- Build TTY → pane lookup ---

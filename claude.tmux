@@ -27,16 +27,21 @@ if [ -n "$resurrect_dir" ]; then
     save_cmd="bash $SCRIPTS_DIR/session-save.sh"
     restore_cmd="bash $SCRIPTS_DIR/session-restore.sh"
 
-    if [ -n "$existing_save" ]; then
-        tmux set-option -g @resurrect-hook-post-save-all "$existing_save; $save_cmd"
-    else
-        tmux set-option -g @resurrect-hook-post-save-all "$save_cmd"
+    # Guard: skip if already hooked (idempotent on prefix+I reload)
+    if ! echo "$existing_save" | grep -qF "session-save.sh"; then
+        if [ -n "$existing_save" ]; then
+            tmux set-option -g @resurrect-hook-post-save-all "$existing_save; $save_cmd"
+        else
+            tmux set-option -g @resurrect-hook-post-save-all "$save_cmd"
+        fi
     fi
 
-    if [ -n "$existing_restore" ]; then
-        tmux set-option -g @resurrect-hook-post-restore-all "$existing_restore; $restore_cmd"
-    else
-        tmux set-option -g @resurrect-hook-post-restore-all "$restore_cmd"
+    if ! echo "$existing_restore" | grep -qF "session-restore.sh"; then
+        if [ -n "$existing_restore" ]; then
+            tmux set-option -g @resurrect-hook-post-restore-all "$existing_restore; $restore_cmd"
+        else
+            tmux set-option -g @resurrect-hook-post-restore-all "$restore_cmd"
+        fi
     fi
 fi
 
