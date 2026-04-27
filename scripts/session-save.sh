@@ -21,7 +21,7 @@ MAX_SAVES=${TMUX_CLAUDE_MAX_SAVES:-20}
 
 # --- Prune old saves ---
 if [ -d "$RESURRECT_DIR" ]; then
-    (cd "$RESURRECT_DIR" && ls -t tmux_resurrect_*.txt 2>/dev/null | tail -n +$((MAX_SAVES + 1)) | xargs rm -f 2>/dev/null)
+    (cd "$RESURRECT_DIR" && ls -t tmux_resurrect_*.txt 2>/dev/null | tail -n +$((MAX_SAVES + 1)) | xargs rm -f 2>/dev/null) || true
 fi
 
 # --- Build mapping (atomic: write temp, mv on success) ---
@@ -33,7 +33,7 @@ echo "# Format: session:window.pane|tool|session_id|cwd|window_name" >> "$tmpfil
 
 pane_count=0
 
-for session in $(tmux list-sessions -F '#{session_name}' 2>/dev/null); do
+while IFS= read -r session; do
     for win in $(tmux list-windows -t "$session" -F '#{window_index}' 2>/dev/null); do
         wname=$(tmux display-message -p -t "$session:$win" '#{window_name}')
         for pane in $(tmux list-panes -t "$session:$win" -F '#{pane_index}' 2>/dev/null); do
@@ -80,12 +80,16 @@ for session in $(tmux list-sessions -F '#{session_name}' 2>/dev/null); do
 
             [ -z "$tool" ] && continue
 
-            use_dir="${claude_cwd:-${codex_cwd:-$dir}}"
+            case "$tool" in
+                claude) use_dir="${claude_cwd:-$dir}" ;;
+                codex)  use_dir="${codex_cwd:-$dir}" ;;
+                *)      use_dir="$dir" ;;
+            esac
             echo "$target|$tool|${sid:-picker}|$use_dir|$wname" >> "$tmpfile"
             pane_count=$((pane_count + 1))
         done
     done
-done
+done < <(tmux list-sessions -F '#{session_name}' 2>/dev/null)
 
 if [ "$pane_count" -eq 0 ] && [ -f "$PANE_MAP" ]; then
     rm -f "$tmpfile"
