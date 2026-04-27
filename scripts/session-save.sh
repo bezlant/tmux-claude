@@ -1,18 +1,22 @@
 #!/usr/bin/env bash
 # tmux-claude: Post-save hook for tmux-resurrect
 # 1. Prune old resurrect files (keep last N)
-# 2. Record pane→session UUID mapping using Claude Code's own PID files
+# 2. Record pane→session mapping using tmux pane options set by SessionStart hooks
+#    Falls back to process inspection for sessions started before hooks were installed.
 #
-# Claude Code writes ~/.claude/sessions/<pid>.json for every running
-# instance, containing the exact sessionId. We read these directly
-# instead of heuristics — no guessing, no name collisions.
+# Requires SessionStart hooks in Claude Code and Codex that write:
+#   @claude_session_id / @claude_cwd  (Claude)
+#   @codex_session_id  / @codex_cwd   (Codex)
+#
+# Format: session:window.pane|tool|session_id|cwd|window_name
+
+set -euo pipefail
 
 RESURRECT_DIR=$(tmux show-option -gqv @resurrect-dir 2>/dev/null)
 RESURRECT_DIR="${RESURRECT_DIR:-$HOME/.tmux/resurrect}"
 RESURRECT_DIR="${RESURRECT_DIR/#\~/$HOME}"
 
-MAPPING_FILE="${RESURRECT_DIR}/claude-panes.txt"
-CLAUDE_SESSIONS="${HOME}/.claude/sessions"
+PANE_MAP="${RESURRECT_DIR}/claude-panes.txt"
 MAX_SAVES=${TMUX_CLAUDE_MAX_SAVES:-20}
 
 # --- Prune old saves ---
@@ -20,25 +24,74 @@ if [ -d "$RESURRECT_DIR" ]; then
     (cd "$RESURRECT_DIR" && ls -t tmux_resurrect_*.txt 2>/dev/null | tail -n +$((MAX_SAVES + 1)) | xargs rm -f 2>/dev/null)
 fi
 
-# --- Build TTY → pane lookup ---
-pane_info=$(tmux list-panes -a -F '#{session_name}:#{window_index}.#{pane_index}|#{pane_tty}' 2>/dev/null)
+# --- Build mapping (atomic: write temp, mv on success) ---
+tmpfile=$(mktemp "${PANE_MAP}.XXXXXX")
+trap 'rm -f "$tmpfile"' EXIT
 
-# --- Match claude processes to panes via TTY, get UUID from PID files ---
-: > "$MAPPING_FILE"
-while read -r tty pid rest; do
-    [ -z "$tty" ] || [ "$tty" = "??" ] && continue
-    full_tty="/dev/$tty"
+echo "# Claude/Codex session mapping — $(date)" > "$tmpfile"
+echo "# Format: session:window.pane|tool|session_id|cwd|window_name" >> "$tmpfile"
 
-    # Match TTY to pane
-    target=$(echo "$pane_info" | grep "|${full_tty}$" | head -1 | cut -d'|' -f1)
-    [ -z "$target" ] && continue
+pane_count=0
 
-    # Read session UUID from Claude Code's own PID file
-    pidfile="${CLAUDE_SESSIONS}/${pid}.json"
-    uuid=""
-    if [ -f "$pidfile" ]; then
-        uuid=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['sessionId'])" "$pidfile" 2>/dev/null)
-    fi
+for session in $(tmux list-sessions -F '#{session_name}' 2>/dev/null); do
+    for win in $(tmux list-windows -t "$session" -F '#{window_index}' 2>/dev/null); do
+        wname=$(tmux display-message -p -t "$session:$win" '#{window_name}')
+        for pane in $(tmux list-panes -t "$session:$win" -F '#{pane_index}' 2>/dev/null); do
+            target="$session:$win.$pane"
+            cmd=$(tmux display-message -p -t "$target" '#{pane_current_command}')
+            dir=$(tmux display-message -p -t "$target" '#{pane_current_path}')
 
-    echo "${target}|${uuid}" >> "$MAPPING_FILE"
-done < <(ps -eo tty=,pid=,args= 2>/dev/null | awk '$3 == "claude"')
+            claude_sid=$(tmux show-options -p -t "$target" -v @claude_session_id 2>/dev/null || true)
+            claude_cwd=$(tmux show-options -p -t "$target" -v @claude_cwd 2>/dev/null || true)
+            codex_sid=$(tmux show-options -p -t "$target" -v @codex_session_id 2>/dev/null || true)
+            codex_cwd=$(tmux show-options -p -t "$target" -v @codex_cwd 2>/dev/null || true)
+
+            tool=""
+            sid=""
+
+            if [ -n "$claude_sid" ]; then
+                tool="claude"
+                sid="$claude_sid"
+            elif [ -n "$codex_sid" ]; then
+                tool="codex"
+                sid="$codex_sid"
+            elif echo "$cmd" | grep -q 'codex'; then
+                tool="codex"
+                sid="picker"
+            elif echo "$cmd" | grep -q 'nvim\|vim'; then
+                tool="nvim"
+                sid=""
+            elif echo "$cmd" | grep -q 'just'; then
+                pid=$(tmux display-message -p -t "$target" '#{pane_pid}')
+                child_cmd=$(ps -o command= -p $(pgrep -P "$pid" 2>/dev/null | head -1) 2>/dev/null | head -1 || true)
+                if echo "$child_cmd" | grep -q 'just'; then
+                    tool="just"
+                    sid=$(echo "$child_cmd" | sed 's/.*just //' | head -c 50)
+                fi
+            else
+                pid=$(tmux display-message -p -t "$target" '#{pane_pid}')
+                child_cmd=$(ps -o command= -p $(pgrep -P "$pid" 2>/dev/null | head -1) 2>/dev/null || true)
+                if echo "$child_cmd" | grep -q 'claude'; then
+                    tool="claude"
+                    sid=$(echo "$child_cmd" | grep -oE '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' | head -1 || true)
+                    [ -z "$sid" ] && sid="picker"
+                fi
+            fi
+
+            [ -z "$tool" ] && continue
+
+            use_dir="${claude_cwd:-${codex_cwd:-$dir}}"
+            echo "$target|$tool|${sid:-picker}|$use_dir|$wname" >> "$tmpfile"
+            pane_count=$((pane_count + 1))
+        done
+    done
+done
+
+if [ "$pane_count" -eq 0 ] && [ -f "$PANE_MAP" ]; then
+    rm -f "$tmpfile"
+    trap - EXIT
+    exit 0
+fi
+
+mv "$tmpfile" "$PANE_MAP"
+trap - EXIT

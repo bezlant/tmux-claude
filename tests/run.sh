@@ -52,75 +52,56 @@ assert_not_contains() {
 }
 
 # ============================================================
-echo "=== session-save: process matching ==="
-# ============================================================
-
-ps_output="ttys001  55588 claude --dangerously-skip-permissions --teammate-mode tmux
-ttys002  12345 /bin/bash /Users/foo/.claude/statusline-simple.sh
-ttys003  23456 node /opt/homebrew/bin/claude-limitline
-ttys001  34567 fish -c claude --version
-ttys004  45678 claude --resume abc123
-??       56789 /bin/zsh -c source /Users/foo/.claude/shell-snapshots/snap.sh"
-
-matched=$(echo "$ps_output" | awk '$3 == "claude"')
-
-assert_contains "matches claude binary" "ttys001" "$matched"
-assert_contains "matches claude --resume" "ttys004" "$matched"
-assert_not_contains "rejects .claude/ paths" "statusline" "$matched"
-assert_not_contains "rejects claude-limitline" "limitline" "$matched"
-assert_not_contains "rejects shell-snapshots" "shell-snapshots" "$matched"
-assert_not_contains "rejects fish -c claude" "fish" "$matched"
-
-# ============================================================
-echo ""
-echo "=== session-save: PID file UUID extraction ==="
-# ============================================================
-
-tmpdir=$(mktemp -d)
-mkdir -p "$tmpdir/sessions"
-
-# Valid PID file
-echo '{"pid":12345,"sessionId":"aaaaaaaa-1111-2222-3333-444444444444","cwd":"/foo"}' > "$tmpdir/sessions/12345.json"
-uuid=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['sessionId'])" "$tmpdir/sessions/12345.json" 2>/dev/null)
-assert_eq "extracts UUID from PID file" "aaaaaaaa-1111-2222-3333-444444444444" "$uuid"
-
-# Missing PID file
-uuid=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['sessionId'])" "$tmpdir/sessions/99999.json" 2>/dev/null)
-assert_eq "missing PID file returns empty" "" "$uuid"
-
-# Malformed PID file
-echo 'not json' > "$tmpdir/sessions/88888.json"
-uuid=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['sessionId'])" "$tmpdir/sessions/88888.json" 2>/dev/null)
-assert_eq "malformed PID file returns empty" "" "$uuid"
-
-rm -rf "$tmpdir"
-
-# ============================================================
-echo ""
-echo "=== session-restore: UUID-based resume ==="
+echo "=== session-restore: 5-field format parsing ==="
 # ============================================================
 
 tmpdir=$(mktemp -d)
 cat > "$tmpdir/claude-panes.txt" <<'EOF'
-0:1.1|aaaaaaaa-1111-2222-3333-444444444444
-0:2.1|bbbbbbbb-5555-6666-7777-888888888888
-0:3.1|
+# Claude/Codex session mapping — test
+# Format: session:window.pane|tool|session_id|cwd|window_name
+0:1.1|claude|aaaaaaaa-1111-2222-3333-444444444444|/Users/test/project|my-window
+0:2.1|codex|bbbbbbbb-5555-6666-7777-888888888888|/Users/test/other|codex-win
+0:3.1|claude|picker|/Users/test/project|picker-win
+0:4.1|codex|picker|/Users/test/project|codex-picker
+0:5.1|nvim|picker|/Users/test/project|editor
+0:6.1|just|dev|/Users/test/project|server
 EOF
 
 cmds=""
-while IFS='|' read -r target uuid; do
+while IFS='|' read -r target tool sid cwd wname; do
+    [[ "$target" =~ ^#.*$ ]] && continue
     [ -z "$target" ] && continue
-    if [ -n "$uuid" ]; then
-        cmds="${cmds}claude --resume '${uuid}'\n"
-    else
-        cmds="${cmds}claude --resume\n"
-    fi
+    case "$tool" in
+        claude)
+            if [ "$sid" = "picker" ]; then
+                cmds="${cmds}cd \"$cwd\" && ccy --resume\n"
+            else
+                cmds="${cmds}cd \"$cwd\" && ccy --resume $sid\n"
+            fi
+            ;;
+        codex)
+            if [ "$sid" = "picker" ]; then
+                cmds="${cmds}cd \"$cwd\" && cxy resume\n"
+            else
+                cmds="${cmds}cd \"$cwd\" && cxy resume $sid\n"
+            fi
+            ;;
+        nvim)
+            cmds="${cmds}cd \"$cwd\" && nvim\n"
+            ;;
+        just)
+            cmds="${cmds}cd \"$cwd\" && just $sid\n"
+            ;;
+    esac
 done < "$tmpdir/claude-panes.txt"
 
-assert_contains "UUID pane gets direct resume" "claude --resume 'aaaaaaaa-1111-2222-3333-444444444444'" "$cmds"
-assert_contains "second UUID pane gets direct resume" "claude --resume 'bbbbbbbb-5555-6666-7777-888888888888'" "$cmds"
-assert_contains "no-UUID pane gets picker" "claude --resume" "$cmds"
-assert_eq "exactly 3 commands" "3" "$(echo -e "$cmds" | grep -c 'claude --resume')"
+assert_contains "claude UUID gets ccy --resume UUID" "ccy --resume aaaaaaaa-1111-2222-3333-444444444444" "$cmds"
+assert_contains "codex UUID gets cxy resume UUID" "cxy resume bbbbbbbb-5555-6666-7777-888888888888" "$cmds"
+assert_contains "claude picker gets ccy --resume" "ccy --resume" "$cmds"
+assert_contains "codex picker gets cxy resume" "cxy resume" "$cmds"
+assert_contains "nvim pane opens nvim" "nvim" "$cmds"
+assert_contains "just pane runs recipe" "just dev" "$cmds"
+assert_eq "6 commands total" "6" "$(echo -e "$cmds" | grep -c '.')"
 
 rm -rf "$tmpdir"
 
@@ -132,20 +113,60 @@ echo "=== session-restore: empty/missing mapping file ==="
 tmpdir=$(mktemp -d)
 
 result=$(bash -c "
-    MAPPING_FILE='$tmpdir/claude-panes.txt'
-    [ -f \"\$MAPPING_FILE\" ] || { echo 'skipped'; exit 0; }
+    PANE_MAP='$tmpdir/claude-panes.txt'
+    [ -f \"\$PANE_MAP\" ] || { echo 'skipped'; exit 0; }
     echo 'ran'
 ")
 assert_eq "missing file -> skip" "skipped" "$result"
 
 touch "$tmpdir/claude-panes.txt"
 result=$(bash -c "
-    MAPPING_FILE='$tmpdir/claude-panes.txt'
-    [ -f \"\$MAPPING_FILE\" ] || { echo 'skipped'; exit 0; }
-    [ -s \"\$MAPPING_FILE\" ] || { echo 'skipped-empty'; exit 0; }
+    PANE_MAP='$tmpdir/claude-panes.txt'
+    [ -f \"\$PANE_MAP\" ] || { echo 'skipped'; exit 0; }
+    [ -s \"\$PANE_MAP\" ] || { echo 'skipped-empty'; exit 0; }
     echo 'ran'
 ")
 assert_eq "empty file -> skip" "skipped-empty" "$result"
+
+rm -rf "$tmpdir"
+
+# ============================================================
+echo ""
+echo "=== session-save: atomic write ==="
+# ============================================================
+
+tmpdir=$(mktemp -d)
+echo "old-mapping" > "$tmpdir/claude-panes.txt"
+
+tmpfile=$(mktemp "$tmpdir/claude-panes.txt.XXXXXX")
+echo "new-mapping" > "$tmpfile"
+mv "$tmpfile" "$tmpdir/claude-panes.txt"
+
+content=$(cat "$tmpdir/claude-panes.txt")
+assert_eq "atomic mv overwrites cleanly" "new-mapping" "$content"
+assert_eq "no temp files left" "1" "$(ls "$tmpdir" | wc -l | tr -d ' ')"
+
+rm -rf "$tmpdir"
+
+# ============================================================
+echo ""
+echo "=== session-save: no-clobber on empty enumeration ==="
+# ============================================================
+
+tmpdir=$(mktemp -d)
+echo "precious-mapping" > "$tmpdir/claude-panes.txt"
+
+# Simulate: save found 0 panes but mapping exists → should not overwrite
+pane_count=0
+if [ "$pane_count" -eq 0 ] && [ -f "$tmpdir/claude-panes.txt" ]; then
+    preserved=true
+else
+    preserved=false
+fi
+assert_eq "zero-pane save preserves existing mapping" "true" "$preserved"
+
+content=$(cat "$tmpdir/claude-panes.txt")
+assert_eq "mapping content unchanged" "precious-mapping" "$content"
 
 rm -rf "$tmpdir"
 
@@ -162,6 +183,54 @@ assert_eq "25 files before prune" "25" "$(ls "$tmpdir"/tmux_resurrect_*.txt | wc
 
 (cd "$tmpdir" && ls -t tmux_resurrect_*.txt 2>/dev/null | tail -n +21 | xargs rm -f 2>/dev/null)
 assert_eq "20 files after prune" "20" "$(ls "$tmpdir"/tmux_resurrect_*.txt | wc -l | tr -d ' ')"
+
+rm -rf "$tmpdir"
+
+# ============================================================
+echo ""
+echo "=== session-restore: paths with spaces ==="
+# ============================================================
+
+tmpdir=$(mktemp -d)
+cat > "$tmpdir/claude-panes.txt" <<'EOF'
+0:1.1|claude|abc-123|/Users/test/my project/src|spaced-path
+EOF
+
+cmds=""
+while IFS='|' read -r target tool sid cwd wname; do
+    [[ "$target" =~ ^#.*$ ]] && continue
+    [ -z "$target" ] && continue
+    if [ "$tool" = "claude" ]; then
+        cmds="cd \"$cwd\" && ccy --resume $sid"
+    fi
+done < "$tmpdir/claude-panes.txt"
+
+assert_contains "path with space is quoted" 'cd "/Users/test/my project/src"' "$cmds"
+
+rm -rf "$tmpdir"
+
+# ============================================================
+echo ""
+echo "=== session-restore: comment and blank line handling ==="
+# ============================================================
+
+tmpdir=$(mktemp -d)
+cat > "$tmpdir/claude-panes.txt" <<'EOF'
+# This is a comment
+# Another comment
+
+0:1.1|claude|abc-123|/tmp|win1
+
+EOF
+
+count=0
+while IFS='|' read -r target tool sid cwd wname; do
+    [[ "$target" =~ ^#.*$ ]] && continue
+    [ -z "$target" ] && continue
+    count=$((count + 1))
+done < "$tmpdir/claude-panes.txt"
+
+assert_eq "skips comments and blanks, finds 1 entry" "1" "$count"
 
 rm -rf "$tmpdir"
 
@@ -257,7 +326,6 @@ if [ -n "$TMUX" ]; then
     assert_contains "restore hook chains existing" "echo existing-restore" "$restore_hook"
     assert_contains "restore hook adds session-restore" "session-restore.sh" "$restore_hook"
 
-    # Restore originals before idempotency test
     if [ -n "$orig_save" ]; then
         tmux set-option -g @resurrect-hook-post-save-all "$orig_save" 2>/dev/null
     else
@@ -283,11 +351,9 @@ if [ -n "$TMUX" ]; then
     orig_save=$(tmux show-option -gqv @resurrect-hook-post-save-all 2>/dev/null)
     orig_restore=$(tmux show-option -gqv @resurrect-hook-post-restore-all 2>/dev/null)
 
-    # Start clean
     tmux set-option -gu @resurrect-hook-post-save-all 2>/dev/null
     tmux set-option -gu @resurrect-hook-post-restore-all 2>/dev/null
 
-    # Load plugin twice (simulates prefix+I reload)
     bash "$PLUGIN_DIR/claude.tmux" 2>/dev/null
     bash "$PLUGIN_DIR/claude.tmux" 2>/dev/null
 
@@ -300,7 +366,6 @@ if [ -n "$TMUX" ]; then
     assert_eq "save hook appears exactly once after double load" "1" "$save_count"
     assert_eq "restore hook appears exactly once after double load" "1" "$restore_count"
 
-    # Also test: reload preserves existing user hooks
     tmux set-option -gu @resurrect-hook-post-save-all 2>/dev/null
     tmux set-option -g @resurrect-hook-post-save-all "echo user-hook" 2>/dev/null
     bash "$PLUGIN_DIR/claude.tmux" 2>/dev/null
@@ -310,7 +375,6 @@ if [ -n "$TMUX" ]; then
     assert_contains "user hook preserved after double load" "echo user-hook" "$save_hook"
     assert_eq "save hook once even with user hook + double load" "1" "$save_count"
 
-    # Restore originals
     if [ -n "$orig_save" ]; then
         tmux set-option -g @resurrect-hook-post-save-all "$orig_save" 2>/dev/null
     else
@@ -329,24 +393,46 @@ fi
 
 # ============================================================
 echo ""
-echo "=== session-save: live PID file mapping ==="
+echo "=== stale pane option clearing ==="
 # ============================================================
 
-if [ -n "$TMUX" ] && [ -d "$HOME/.claude/sessions" ]; then
-    # Count running claude processes
-    claude_count=$(ps -eo args= | awk '$1 == "claude"' | wc -l | tr -d ' ')
-    # Count PID files for running PIDs
-    matched=0
-    for pidfile in "$HOME/.claude/sessions"/*.json; do
-        [ -f "$pidfile" ] || continue
-        pid=$(basename "$pidfile" .json)
-        if ps -p "$pid" > /dev/null 2>&1; then
-            matched=$((matched + 1))
-        fi
-    done
-    assert_eq "PID files exist for all running claudes" "$claude_count" "$matched"
+if [ -n "$TMUX" ]; then
+    test_pane=$(tmux display-message -p '#{pane_id}')
+
+    tmux set-option -p -t "$test_pane" @claude_session_id "old-claude-id" 2>/dev/null
+    tmux set-option -p -t "$test_pane" @claude_cwd "/old/claude" 2>/dev/null
+    tmux set-option -p -t "$test_pane" @codex_session_id "old-codex-id" 2>/dev/null
+    tmux set-option -p -t "$test_pane" @codex_cwd "/old/codex" 2>/dev/null
+
+    # Simulate Claude hook: sets claude, clears codex
+    tmux set-option -p -t "$test_pane" @claude_session_id "new-claude-id" 2>/dev/null
+    tmux set-option -pu -t "$test_pane" @codex_session_id 2>/dev/null
+    tmux set-option -pu -t "$test_pane" @codex_cwd 2>/dev/null
+
+    claude_val=$(tmux show-options -p -t "$test_pane" -v @claude_session_id 2>/dev/null || true)
+    codex_val=$(tmux show-options -p -t "$test_pane" -v @codex_session_id 2>/dev/null || true)
+
+    assert_eq "claude hook sets claude_session_id" "new-claude-id" "$claude_val"
+    assert_eq "claude hook clears codex_session_id" "" "$codex_val"
+
+    # Simulate Codex hook: sets codex, clears claude
+    tmux set-option -p -t "$test_pane" @codex_session_id "new-codex-id" 2>/dev/null
+    tmux set-option -pu -t "$test_pane" @claude_session_id 2>/dev/null
+    tmux set-option -pu -t "$test_pane" @claude_cwd 2>/dev/null
+
+    claude_val=$(tmux show-options -p -t "$test_pane" -v @claude_session_id 2>/dev/null || true)
+    codex_val=$(tmux show-options -p -t "$test_pane" -v @codex_session_id 2>/dev/null || true)
+
+    assert_eq "codex hook clears claude_session_id" "" "$claude_val"
+    assert_eq "codex hook sets codex_session_id" "new-codex-id" "$codex_val"
+
+    # Cleanup
+    tmux set-option -pu -t "$test_pane" @claude_session_id 2>/dev/null
+    tmux set-option -pu -t "$test_pane" @claude_cwd 2>/dev/null
+    tmux set-option -pu -t "$test_pane" @codex_session_id 2>/dev/null
+    tmux set-option -pu -t "$test_pane" @codex_cwd 2>/dev/null
 else
-    echo "  SKIP: not in tmux or no session dir"
+    echo "  SKIP: not in tmux"
 fi
 
 # ============================================================
