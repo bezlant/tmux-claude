@@ -244,12 +244,14 @@ if command -v fish &>/dev/null; then
         local flags="$1" expected="$2"
         local result
         result=$(fish -c "
+            source $PLUGIN_DIR/shell/__tmux_claude_find_session.fish
             source $PLUGIN_DIR/shell/__tmux_claude_session_args.fish
             set -gx TMUX '/tmp/test,1,0'
+            set -gx TMUX_PANE '%0'
             function tmux
-                switch \$argv[3]
-                    case '#{session_name}'; echo test
-                    case '#{window_index}'; echo 0
+                switch \$argv[5]
+                    case '#{window_name}'; echo test
+                    case '#{window_panes}'; echo 1
                     case '#{pane_index}'; echo 1
                 end
             end
