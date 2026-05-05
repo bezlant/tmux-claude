@@ -8,10 +8,9 @@ __tmux_claude_find_session() {
     [ -d "$project_dir" ] || return
 
     python3 -c "
-import os, sys
+import os, sys, json
 
 d, target = sys.argv[1], sys.argv[2]
-target_b = ('\"' + target + '\"').encode()
 files = []
 for f in os.listdir(d):
     if f.endswith('.jsonl'):
@@ -20,10 +19,17 @@ for f in os.listdir(d):
 files.sort(reverse=True)
 
 for _, fp, fname in files:
-    with open(fp, 'rb') as fh:
-        for raw in fh:
-            if b'\"custom-title\"' in raw:
-                if target_b in raw:
+    with open(fp) as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except (json.JSONDecodeError, ValueError):
+                continue
+            if obj.get('type') == 'custom-title':
+                if obj.get('customTitle') == target:
                     print(fname[:-6])
                     sys.exit(0)
                 break

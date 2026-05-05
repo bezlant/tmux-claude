@@ -54,11 +54,18 @@ Each hook reads `session_id` and `cwd` from the JSON stdin, writes them to tmux 
 
 ### Shell wrapper (optional)
 
-Tags new Claude sessions with tmux pane coordinates for the session picker:
+Auto-resumes Claude sessions by window name. On launch it finds the previous session for that pane and passes `--resume <uuid>`:
 
 ```sh
 # Fish
 cp ~/.config/tmux/plugins/tmux-claude/shell/__tmux_claude_session_args.fish ~/.config/fish/functions/
+cp ~/.config/tmux/plugins/tmux-claude/shell/__tmux_claude_find_session.fish ~/.config/fish/functions/
+
+# Bash (add to ~/.bashrc)
+source ~/.config/tmux/plugins/tmux-claude/shell/claude.bash
+
+# Zsh (add to ~/.zshrc)
+source ~/.config/tmux/plugins/tmux-claude/shell/claude.zsh
 ```
 
 ## Features
